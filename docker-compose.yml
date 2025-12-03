@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Service 1: Database (Kho chứa dữ liệu)
+  db:
+    image: postgres:15-alpine
+    container_name: sales_db_container
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpassword
+      POSTGRES_DB: sales_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - sales-network
+    restart: always
+
+  # Service 2: App Python (Giao diện Dashboard)
+  web-app:
+    build: .
+    container_name: sales_app_container
+    ports:
+      - "8501:8501"
+    depends_on:
+      - db  # Bắt buộc DB phải chạy xong thì App mới chạy
+    environment:
+      # Cấu hình để App biết đường tìm đến DB
+      DB_HOST: db
+      DB_NAME: sales_db
+      DB_USER: admin
+      DB_PASSWORD: adminpassword
+    networks:
+      - sales-network
+
+volumes:
+  postgres_data:
+
+networks:
+  sales-network:

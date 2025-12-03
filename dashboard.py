@@ -15,63 +15,40 @@ st.set_page_config(
 
 # --- Tải và Xử lý Dữ liệu ---
 # Sử dụng @st.cache_data để tăng tốc độ tải lại khi không có thay đổi
+# --- Hàm kết nối và nạp dữ liệu ---
 @st.cache_data
 def load_and_process_data():
-    """Tải, làm sạch và tích hợp dữ liệu."""
+    # 1. Tạo kết nối đến Database (Thông tin lấy từ docker-compose)
+    db_connection_str = 'postgresql://admin:adminpassword@db:5432/sales_db'
+    db_connection = create_engine(db_connection_str)
+
     try:
-        # Đọc file CSV
-        df_sales = pd.read_csv('supermarket_sales.csv')
+        # 2. Thử đọc dữ liệu từ Database trước
+        df = pd.read_sql("SELECT * FROM sales_table", db_connection)
+        
+        # Nếu DB chưa có dữ liệu (lần chạy đầu tiên), sẽ nạp từ CSV vào
+        if df.empty:
+            raise ValueError("Database trống")
+            
+    except Exception:
+        # 3. Nếu lỗi (hoặc DB trống), đọc từ file CSV gốc để "Seeding" (Gieo dữ liệu)
+        df = pd.read_csv('supermarket_sales.csv')
+        
+        # Xử lý chuẩn hóa ngày tháng trước khi lưu
+        df['Date'] = pd.to_datetime(df['Date'])
+        # Chuyển cột Time sang string để tránh lỗi lưu DB (đơn giản hóa)
+        df['Time'] = df['Time'].astype(str) 
+        
+        # 4. Lưu ngược dữ liệu sạch vào Database
+        df.to_sql('sales_table', db_connection, if_exists='replace', index=False)
+    
+    # Đảm bảo cột Date luôn là datetime sau khi đọc ra
+    df['Date'] = pd.to_datetime(df['Date'])
+    
+    return df
 
-        # Đọc file JSON (nếu có)
-        try:
-            df_products = pd.read_json('product_info.json')
-        except ValueError: # Xử lý trường hợp file JSON rỗng hoặc lỗi
-            df_products = None
-            st.warning("Không tìm thấy hoặc file 'product_info.json' bị lỗi. Sẽ bỏ qua tích hợp danh mục.")
-
-        # --- Làm sạch và Chế biến ---
-        # Chuẩn hóa Date và Time
-        df_sales['Date'] = pd.to_datetime(df_sales['Date'])
-        # Cố gắng chuyển đổi Time, bỏ qua lỗi nếu có định dạng không nhất quán
-        try:
-            df_sales['Time'] = pd.to_datetime(df_sales['Time'], format='%H:%M').dt.time
-        except ValueError:
-             # Nếu format '%H:%M' lỗi, thử format khác hoặc giữ nguyên object
-             try:
-                 df_sales['Time'] = pd.to_datetime(df_sales['Time']).dt.time
-             except Exception:
-                 st.warning("Không thể chuẩn hóa cột 'Time' do định dạng không nhất quán.")
-
-
-        # Tạo cột Month và Hour
-        df_sales['Month'] = df_sales['Date'].dt.month
-        # Cập nhật cách lấy Hour an toàn hơn
-        def get_hour(time_obj):
-            try:
-                return time_obj.hour
-            except AttributeError:
-                return None # Trả về None nếu không phải đối tượng time hợp lệ
-        df_sales['Hour'] = df_sales['Time'].apply(get_hour)
-        # Loại bỏ các dòng có Hour bị lỗi (nếu có)
-        df_sales.dropna(subset=['Hour'], inplace=True)
-        df_sales['Hour'] = df_sales['Hour'].astype(int)
-
-
-        # --- Tích hợp Dữ liệu (Merge) ---
-        if df_products is not None:
-            df_full = pd.merge(df_sales, df_products, on='Product line', how='left')
-        else:
-            df_full = df_sales
-            df_full['Category'] = df_full['Product line'] # Tạm dùng Product line nếu không có Category
-
-        return df_full
-
-    except FileNotFoundError:
-        st.error("Lỗi: Không tìm thấy file 'supermarket_sales.csv'. Vui lòng đặt file vào cùng thư mục với dashboard.py.")
-        return None
-
-# Gọi hàm tải dữ liệu
-df_full = load_and_process_data()
+# --- Gọi hàm load dữ liệu ---
+df_sales = load_and_process_data()
 
 # --- Xây dựng Giao diện Dashboard ---
 st.title('📊 Dashboard Phân Tích Dữ Liệu Bán Hàng Siêu Thị')

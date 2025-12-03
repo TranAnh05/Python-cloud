@@ -1,233 +1,193 @@
-# --- File: dashboard.py ---
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sqlalchemy import create_engine, text
+import time
+# Import thư viện cho Machine Learning và Biểu đồ tương tác
+from sklearn.linear_model import LinearRegression
+import plotly.graph_objects as go
 
 # --- Cấu hình trang ---
 st.set_page_config(
     page_title="Dashboard Phân Tích Bán Hàng",
     page_icon="🛒",
-    layout="wide" # Sử dụng layout rộng hơn
+    layout="wide"
 )
 
-# --- Tải và Xử lý Dữ liệu ---
-# Sử dụng @st.cache_data để tăng tốc độ tải lại khi không có thay đổi
 # --- Hàm kết nối và nạp dữ liệu ---
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def load_and_process_data():
-    # 1. Tạo kết nối đến Database (Thông tin lấy từ docker-compose)
+    # Cấu hình kết nối PostgreSQL
     db_connection_str = 'postgresql://admin:adminpassword@db:5432/sales_db'
     db_connection = create_engine(db_connection_str)
 
+    # Thêm cơ chế chờ Database khởi động (Retry logic)
+    max_retries = 5
+    for i in range(max_retries):
+        try:
+            with db_connection.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            break 
+        except Exception:
+            if i < max_retries - 1:
+                time.sleep(5) # Đợi 5 giây
+            else:
+                st.error("Không thể kết nối đến PostgreSQL. Vui lòng kiểm tra Docker.")
+                return None
+
     try:
-        # 2. Thử đọc dữ liệu từ Database trước
+        # 1. Thử đọc dữ liệu từ Database
         df = pd.read_sql("SELECT * FROM sales_table", db_connection)
         
-        # Nếu DB chưa có dữ liệu (lần chạy đầu tiên), sẽ nạp từ CSV vào
         if df.empty:
             raise ValueError("Database trống")
             
     except Exception:
-        # 3. Nếu lỗi (hoặc DB trống), đọc từ file CSV gốc để "Seeding" (Gieo dữ liệu)
-        df = pd.read_csv('supermarket_sales.csv')
-        
-        # Xử lý chuẩn hóa ngày tháng trước khi lưu
-        df['Date'] = pd.to_datetime(df['Date'])
-        # Chuyển cột Time sang string để tránh lỗi lưu DB (đơn giản hóa)
-        df['Time'] = df['Time'].astype(str) 
-        
-        # 4. Lưu ngược dữ liệu sạch vào Database
-        df.to_sql('sales_table', db_connection, if_exists='replace', index=False)
+        # 2. Nếu lỗi hoặc DB trống -> Đọc từ CSV và nạp vào DB
+        try:
+            df = pd.read_csv('supermarket_sales.csv')
+            
+            # Xử lý dữ liệu
+            df['Date'] = pd.to_datetime(df['Date'])
+            df['Time'] = df['Time'].astype(str)
+            
+            # Lưu vào PostgreSQL
+            df.to_sql('sales_table', db_connection, if_exists='replace', index=False)
+        except FileNotFoundError:
+            st.error("Không tìm thấy file 'supermarket_sales.csv'.")
+            return None
     
-    # Đảm bảo cột Date luôn là datetime sau khi đọc ra
+    # --- PHẦN QUAN TRỌNG: TẠO CÁC CỘT PHỤ TRỢ (Month, Hour) ---
+    # Chuyển đổi cột Date sang datetime
     df['Date'] = pd.to_datetime(df['Date'])
     
+    # Tạo cột Month (Tháng) từ Date
+    df['Month'] = df['Date'].dt.month
+    
+    # Tạo cột Hour (Giờ) từ Time. Xử lý Time dạng chuỗi "HH:MM"
+    # Chúng ta lấy 2 ký tự đầu và chuyển sang số nguyên
+    try:
+        df['Hour'] = pd.to_datetime(df['Time'], format='%H:%M').dt.hour
+    except:
+        # Dự phòng nếu format khác, lấy số từ chuỗi
+        df['Hour'] = df['Time'].astype(str).str.split(':').str[0].astype(int)
+
     return df
 
 # --- Gọi hàm load dữ liệu ---
-df_sales = load_and_process_data()
+with st.spinner('Đang kết nối Database và tải dữ liệu...'):
+    df_full = load_and_process_data()
 
 # --- Xây dựng Giao diện Dashboard ---
 st.title('📊 Dashboard Phân Tích Dữ Liệu Bán Hàng Siêu Thị')
 st.write('Tương tác với bộ lọc bên dưới để khám phá dữ liệu.')
 
-# Chỉ hiển thị dashboard nếu tải dữ liệu thành công
 if df_full is not None:
 
     # --- Bộ lọc (Sidebar) ---
     st.sidebar.header('Bộ lọc Tương tác ⚙️')
-    # 1. Lọc theo Thành phố (Branch)
-    selected_city = st.sidebar.selectbox(
-        'Chọn Thành Phố (Branch):',
-        ['Tất cả'] + list(df_full['Branch'].unique())
-    )
+    
+    cities = ['Tất cả'] + list(df_full['Branch'].unique())
+    selected_city = st.sidebar.selectbox('Chọn Thành Phố (Branch):', cities)
 
-    # 2. Lọc theo Tháng (Month)
+    months = sorted(df_full['Month'].unique())
     selected_month = st.sidebar.multiselect(
         'Chọn Tháng:',
-        options=sorted(df_full['Month'].unique()),
-        default=sorted(df_full['Month'].unique()) # Mặc định chọn tất cả
+        options=months,
+        default=months
     )
 
     # Áp dụng bộ lọc
-    df_filtered = df_full.copy() # Tạo bản sao để không ảnh hưởng dữ liệu gốc
+    df_filtered = df_full.copy()
     if selected_city != 'Tất cả':
         df_filtered = df_filtered[df_filtered['Branch'] == selected_city]
+    
     if selected_month:
         df_filtered = df_filtered[df_filtered['Month'].isin(selected_month)]
     else:
-        # Nếu không chọn tháng nào, hiển thị thông báo
         st.warning("Vui lòng chọn ít nhất một tháng.")
-        df_filtered = pd.DataFrame() # Trả về DataFrame rỗng
+        df_filtered = pd.DataFrame()
 
-    # --- Hiển thị Kết quả Phân tích ---
     st.header(f'Kết quả cho: {selected_city} - Tháng: {", ".join(map(str, selected_month))}')
 
     if not df_filtered.empty:
-        # 1. Các chỉ số KPI chính
+        # --- KPI ---
         st.subheader('📈 Chỉ số Hiệu suất Chính (KPIs)')
         col1, col2, col3 = st.columns(3)
-        total_revenue = int(df_filtered['Sales'].sum())
-        avg_rating = round(df_filtered['Rating'].mean(), 1) if not df_filtered['Rating'].empty else 0
-        avg_sale_value = round(df_filtered['Sales'].mean(), 2) if not df_filtered['Sales'].empty else 0
+        total_revenue = df_filtered['Sales'].sum()
+        avg_rating = df_filtered['Rating'].mean()
+        avg_sale_value = df_filtered['Sales'].mean()
 
         col1.metric("Tổng Doanh Thu", f"${total_revenue:,.0f}")
-        col2.metric("Đánh Giá TB", f"{avg_rating}/10 ⭐")
+        col2.metric("Đánh Giá TB", f"{avg_rating:.1f}/10 ⭐")
         col3.metric("Hóa Đơn TB", f"${avg_sale_value:,.2f}")
 
-        st.markdown("---") # Đường kẻ ngang
+        st.markdown("---")
 
-        # 2. Layout 2 cột cho các biểu đồ chính
+        # --- Biểu đồ chính (Matplotlib/Seaborn) ---
         fig_col1, fig_col2 = st.columns(2)
 
         with fig_col1:
-            # Biểu đồ 1: Doanh thu theo Mặt hàng (Bar Chart)
             st.subheader('💰 Doanh thu theo Mặt hàng')
             sales_by_product = df_filtered.groupby('Product line')['Sales'].sum().sort_values(ascending=False)
             st.bar_chart(sales_by_product)
 
-            # Biểu đồ 2: Cơ cấu Thanh toán (Pie Chart - Dùng Matplotlib)
             st.subheader('💳 Cơ cấu Hình thức Thanh toán')
             payment_counts = df_filtered['Payment'].value_counts()
-            fig_pie, ax_pie = plt.subplots(figsize=(5, 5)) # Giảm kích thước
-            ax_pie.pie(payment_counts, labels=payment_counts.index, autopct='%1.1f%%',
-                       startangle=90, colors=sns.color_palette('pastel'), textprops={'fontsize': 8}) # Giảm cỡ chữ
+            fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
+            ax_pie.pie(payment_counts, labels=payment_counts.index, autopct='%1.1f%%', 
+                       startangle=90, colors=sns.color_palette('pastel'))
             ax_pie.axis('equal')
             st.pyplot(fig_pie)
 
         with fig_col2:
-            # Biểu đồ 3: Xu hướng Doanh thu theo Giờ (Line Chart)
             st.subheader('⏰ Doanh thu theo Giờ trong Ngày')
             sales_by_hour = df_filtered.groupby('Hour')['Sales'].sum()
             st.line_chart(sales_by_hour)
 
-            # Biểu đồ 4: Tương quan Đánh giá & Doanh thu (Scatter Plot - Dùng Matplotlib/Seaborn)
             st.subheader('⭐ Tương quan Đánh giá & Doanh thu')
-            fig_scatter, ax_scatter = plt.subplots(figsize=(6, 5)) # Giảm kích thước
+            fig_scatter, ax_scatter = plt.subplots(figsize=(6, 5))
             sns.scatterplot(data=df_filtered, x='Rating', y='Sales', hue='Gender', alpha=0.6, ax=ax_scatter)
-            ax_scatter.tick_params(axis='both', which='major', labelsize=8) # Giảm cỡ chữ trục
-            ax_scatter.xaxis.label.set_size(10) # Giảm cỡ chữ nhãn trục X
-            ax_scatter.yaxis.label.set_size(10) # Giảm cỡ chữ nhãn trục Y
-            plt.legend(fontsize='small') # Giảm cỡ chữ chú thích
             st.pyplot(fig_scatter)
 
-        # --- PHẦN MỚI (CẬP NHẬT): TÍCH HỢP MACHINE LEARNING VỚI BIỂU ĐỒ TƯƠNG TÁC (PLOTLY) ---
-        from sklearn.linear_model import LinearRegression
-        import plotly.graph_objects as go # Thư viện vẽ biểu đồ tương tác
-
+        # --- PHẦN MACHINE LEARNING & PLOTLY ---
         st.markdown("---")
         st.header('🤖 Dự Báo Doanh Thu (Machine Learning)')
-        st.write("Sử dụng thuật toán **Hồi quy Tuyến tính (Linear Regression)** để dự báo xu hướng doanh thu trong 30 ngày tới.")
-
-        # 1. Chuẩn bị dữ liệu: Gom doanh thu theo ngày
+        
+        # 1. Chuẩn bị dữ liệu
         daily_sales = df_full.groupby('Date')['Sales'].sum().reset_index()
-
-        # 2. Chuyển đổi ngày tháng sang dạng số (Ordinal) để mô hình hiểu được
         daily_sales['Date_Ordinal'] = daily_sales['Date'].map(pd.Timestamp.toordinal)
 
-        # 3. Khởi tạo và Huấn luyện mô hình
-        X = daily_sales[['Date_Ordinal']] # Dữ liệu đầu vào
-        y = daily_sales['Sales']          # Dữ liệu mục tiêu
-
+        # 2. Huấn luyện mô hình
+        X = daily_sales[['Date_Ordinal']]
+        y = daily_sales['Sales']
         model = LinearRegression()
         model.fit(X, y)
 
-        # 4. Dự báo
-        # Dự báo cho quá khứ (để vẽ đường xu hướng)
+        # 3. Dự báo
         trend_y = model.predict(X)
-
-        # Dự báo cho 30 ngày tương lai
         last_date = daily_sales['Date'].max()
         future_dates = [last_date + pd.Timedelta(days=i) for i in range(1, 31)]
         future_ordinals = [[pd.Timestamp(d).toordinal()] for d in future_dates]
         future_sales = model.predict(future_ordinals)
 
-        # 5. TRỰC QUAN HÓA TƯƠNG TÁC BẰNG PLOTLY
+        # 4. Vẽ biểu đồ Plotly
         fig = go.Figure()
+        
+        # Dữ liệu thực tế
+        fig.add_trace(go.Scatter(x=daily_sales['Date'], y=daily_sales['Sales'], 
+                                mode='lines', name='Thực tế', line=dict(color='#636EFA')))
+        # Đường xu hướng
+        fig.add_trace(go.Scatter(x=daily_sales['Date'], y=trend_y, 
+                                mode='lines', name='Xu hướng', line=dict(color='#EF553B', dash='dash')))
+        # Dự báo tương lai
+        fig.add_trace(go.Scatter(x=future_dates, y=future_sales, 
+                                mode='lines+markers', name='Dự báo 30 ngày', line=dict(color='#00CC96')))
 
-        # Vẽ đường doanh thu thực tế (Quá khứ)
-        fig.add_trace(go.Scatter(
-            x=daily_sales['Date'], 
-            y=daily_sales['Sales'],
-            mode='lines',
-            name='Doanh thu thực tế',
-            line=dict(color='#636EFA'), # Màu xanh tím
-            hovertemplate='Ngày: %{x|%d/%m/%Y}<br>Doanh thu: $%{y:,.0f}'
-        ))
-
-        # Vẽ đường xu hướng (Regression Line)
-        fig.add_trace(go.Scatter(
-            x=daily_sales['Date'], 
-            y=trend_y,
-            mode='lines',
-            name='Đường xu hướng (Trendline)',
-            line=dict(color='#EF553B', dash='dash'), # Màu đỏ, nét đứt
-            hovertemplate='Xu hướng: $%{y:,.0f}'
-        ))
-
-        # Vẽ đường dự báo (Tương lai)
-        fig.add_trace(go.Scatter(
-            x=future_dates, 
-            y=future_sales,
-            mode='lines+markers',
-            name='Dự báo 30 ngày tới',
-            line=dict(color='#00CC96'), # Màu xanh lá
-            marker=dict(size=6),
-            hovertemplate='Ngày dự báo: %{x|%d/%m/%Y}<br>Doanh thu: $%{y:,.0f}'
-        ))
-
-        # Cấu hình giao diện biểu đồ
-        fig.update_layout(
-            title='Biểu đồ Dự báo Doanh thu Tương tác',
-            xaxis_title='Thời gian',
-            yaxis_title='Doanh thu (USD)',
-            hovermode="x unified", # Hiển thị thông tin tất cả các đường khi di chuột
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-        )
-
-        # Hiển thị lên Streamlit
+        fig.update_layout(title='Dự báo Doanh thu Tương lai', xaxis_title='Thời gian', yaxis_title='Doanh thu')
         st.plotly_chart(fig, use_container_width=True)
 
-        # Hiển thị độ chính xác
-        r2_score = model.score(X, y)
-        st.info(f"Độ phù hợp của mô hình (R-squared): {r2_score:.2%}")   
-
-        st.markdown("---")
-
-        # 3. Hiển thị dữ liệu chi tiết (có lọc)
-        st.subheader('📄 Xem Dữ liệu Chi tiết (Đã lọc)')
-        st.dataframe(df_filtered)
-
-       
-
-        
-
     else:
-        st.info("Không có dữ liệu phù hợp với bộ lọc đã chọn.")
-
-else:
-    st.error("Không thể tải dữ liệu. Vui lòng kiểm tra lại file CSV.")
+        st.info("Không có dữ liệu phù hợp với bộ lọc.")

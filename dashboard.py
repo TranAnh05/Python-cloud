@@ -16,36 +16,34 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Hàm kết nối và nạp dữ liệu ---
+# --- Hàm kết nối và nạp dữ liệu (Phiên bản Lưỡng cư: Chạy cả Local & Cloud) ---
 @st.cache_data(show_spinner=False)
 def load_and_process_data():
     # Cấu hình kết nối PostgreSQL
     db_connection_str = 'postgresql://admin:adminpassword@db:5432/sales_db'
-    db_connection = create_engine(db_connection_str)
+    
+    # Tạo engine kết nối (Thêm try/except để tránh lỗi ngay từ bước tạo engine)
+    try:
+        db_connection = create_engine(db_connection_str)
+    except Exception:
+        db_connection = None
 
-    # Thêm cơ chế chờ Database khởi động (Retry logic)
-    max_retries = 5
-    for i in range(max_retries):
+    df = pd.DataFrame() # Khởi tạo rỗng
+
+    # 1. Cố gắng đọc từ Database trước
+    if db_connection:
         try:
+            # Thử kết nối nhanh xem DB có sống không
             with db_connection.connect() as connection:
                 connection.execute(text("SELECT 1"))
-            break 
-        except Exception:
-            if i < max_retries - 1:
-                time.sleep(5) # Đợi 5 giây
-            else:
-                st.error("Không thể kết nối đến PostgreSQL. Vui lòng kiểm tra Docker.")
-                return None
-
-    try:
-        # 1. Thử đọc dữ liệu từ Database
-        df = pd.read_sql("SELECT * FROM sales_table", db_connection)
-        
-        if df.empty:
-            raise ValueError("Database trống")
             
-    except Exception:
-        # 2. Nếu lỗi hoặc DB trống -> Đọc từ CSV và nạp vào DB
+            # Nếu sống thì đọc dữ liệu
+            df = pd.read_sql("SELECT * FROM sales_table", db_connection)
+        except Exception:
+            pass # Nếu lỗi kết nối, bỏ qua để xuống bước đọc CSV
+
+    # 2. Nếu không đọc được từ DB (hoặc DB trống), đọc từ CSV
+    if df.empty:
         try:
             df = pd.read_csv('supermarket_sales.csv')
             
@@ -53,26 +51,26 @@ def load_and_process_data():
             df['Date'] = pd.to_datetime(df['Date'])
             df['Time'] = df['Time'].astype(str)
             
-            # Lưu vào PostgreSQL
-            df.to_sql('sales_table', db_connection, if_exists='replace', index=False)
+            # --- ĐOẠN SỬA QUAN TRỌNG NHẤT Ở ĐÂY ---
+            # Chỉ cố lưu vào DB nếu kết nối tồn tại. Nếu không (đang ở Cloud), thì bỏ qua.
+            if db_connection:
+                try:
+                    df.to_sql('sales_table', db_connection, if_exists='replace', index=False)
+                except Exception:
+                    pass # Không lưu được thì thôi, không báo lỗi
+                    
         except FileNotFoundError:
             st.error("Không tìm thấy file 'supermarket_sales.csv'.")
             return None
     
-    # --- PHẦN QUAN TRỌNG: TẠO CÁC CỘT PHỤ TRỢ (Month, Hour) ---
-    # Chuyển đổi cột Date sang datetime
-    df['Date'] = pd.to_datetime(df['Date'])
-    
-    # Tạo cột Month (Tháng) từ Date
-    df['Month'] = df['Date'].dt.month
-    
-    # Tạo cột Hour (Giờ) từ Time. Xử lý Time dạng chuỗi "HH:MM"
-    # Chúng ta lấy 2 ký tự đầu và chuyển sang số nguyên
-    try:
-        df['Hour'] = pd.to_datetime(df['Time'], format='%H:%M').dt.hour
-    except:
-        # Dự phòng nếu format khác, lấy số từ chuỗi
-        df['Hour'] = df['Time'].astype(str).str.split(':').str[0].astype(int)
+    # --- Tạo các cột phụ trợ ---
+    if not df.empty:
+        df['Date'] = pd.to_datetime(df['Date'])
+        df['Month'] = df['Date'].dt.month
+        try:
+            df['Hour'] = pd.to_datetime(df['Time'], format='%H:%M').dt.hour
+        except:
+            df['Hour'] = df['Time'].astype(str).str.split(':').str[0].astype(int)
 
     return df
 
